@@ -219,9 +219,4 @@ PyQtWebEngine
 
 El mapa usa **Leaflet.js** y **OpenStreetMap**, cargados desde CDN.
 
----
 
-## 👨‍💻 Autor
-
-Desarrollado por **Hector** — Ingeniería de Sistemas, 7mo semestre.
-Curso: Inteligencia Artificial.
