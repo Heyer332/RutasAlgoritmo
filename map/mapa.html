@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Mapa Perú</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+#map { width:100%; height:100vh; background:#1a1a2e; }
+#legend {
+  position:absolute; bottom:24px; left:12px; z-index:1000;
+  background:rgba(22,33,62,0.93); border:1px solid #37474f;
+  border-radius:6px; padding:10px 14px; color:#e0e0e0;
+  font-family:'Segoe UI',sans-serif; font-size:12px;
+  display:none; min-width:210px; max-width:260px;
+}
+#legend h4 { color:#4fc3f7; margin-bottom:6px; font-size:13px; }
+.leg-item { display:flex; align-items:center; margin:3px 0; }
+.leg-dot  { width:14px; height:4px; border-radius:2px; margin-right:8px; flex-shrink:0; }
+#anim-label {
+  position:absolute; top:14px; left:50%; transform:translateX(-50%);
+  z-index:1000; background:rgba(22,33,62,0.93); border:1px solid #4fc3f7;
+  border-radius:20px; padding:6px 20px; color:#4fc3f7;
+  font-family:'Segoe UI',sans-serif; font-size:13px; font-weight:bold;
+  display:none; pointer-events:none; white-space:nowrap;
+}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="legend"><h4>🗺 Algoritmos</h4><div id="legend-items"></div></div>
+<div id="anim-label"></div>
+
+<script>
+// ── Mapa base ─────────────────────────────────────────────────────────────
+var map = L.map('map', { center:[-9.19,-75.01], zoom:6 });
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution:'© OpenStreetMap', maxZoom:18
+}).addTo(map);
+
+var marcadores  = {};   // id -> {marker, data}
+var capas_rutas = {};   // key -> L.polyline
+var animTimer   = null;
+
+var COLORES = {
+  'BFS':'#4fc3f7', 'DFS':'#ce93d8', 'Dijkstra':'#69f0ae',
+  'A*':'#fff176',  'Greedy':'#ffcc80', 'Minimax':'#ef9a9a', 'TSP-GA':'#80cbc4'
+};
+
+// ── Funciones globales (llamadas desde runJavaScript) ─────────────────────
+
+function dibujarProvincias(provincias) {
+  provincias.forEach(function(p) {
+    var m = L.circleMarker([p.lat, p.lon], {
+      radius:4, color:'#4fc3f7', fillColor:'#4fc3f7', fillOpacity:0.7, weight:1
+    }).addTo(map);
+    m.bindTooltip('<b>'+p.provincia+'</b><br><small>'+p.departamento+'</small>');
+    marcadores[p.id-1] = { marker:m, data:p };
+  });
+}
+
+function limpiarRuta() {
+  if (animTimer) { clearTimeout(animTimer); animTimer = null; }
+  Object.values(capas_rutas).forEach(function(l){ map.removeLayer(l); });
+  capas_rutas = {};
+  Object.values(marcadores).forEach(function(m){
+    m.marker.setStyle({color:'#4fc3f7',fillColor:'#4fc3f7',radius:4,opacity:0.7});
+  });
+  document.getElementById('legend').style.display = 'none';
+  document.getElementById('anim-label').style.display = 'none';
+  document.getElementById('legend-items').innerHTML = '';
+}
+
+function dibujarRuta(ruta_ids, provincias_map) {
+  limpiarRuta();
+  if (!ruta_ids || ruta_ids.length === 0) return;
+  var coords = ruta_ids.map(function(id){
+    var p = provincias_map[id]; return [p.lat, p.lon];
+  });
+  var linea = L.polyline(coords, {color:'#ff6b35', weight:3, opacity:0.9}).addTo(map);
+  capas_rutas['single'] = linea;
+  _marcarInicioFin(ruta_ids, provincias_map);
+  map.fitBounds(linea.getBounds(), {padding:[40,40]});
+}
+
+function _marcarInicioFin(ids, pm) {
+  if (!ids || ids.length === 0) return;
+  if (marcadores[ids[0]])
+    marcadores[ids[0]].marker.setStyle({color:'#00e676',fillColor:'#00e676',radius:9,opacity:1});
+  if (marcadores[ids[ids.length-1]])
+    marcadores[ids[ids.length-1]].marker.setStyle({color:'#ff1744',fillColor:'#ff1744',radius:9,opacity:1});
+  for (var i=1; i<ids.length-1; i++) {
+    if (marcadores[ids[i]])
+      marcadores[ids[i]].marker.setStyle({color:'#ffab00',fillColor:'#ffab00',radius:5,opacity:1});
+  }
+}
+
+// ── Animación secuencial ──────────────────────────────────────────────────
+function animarRutas(rutas_json) {
+  limpiarRuta();
+  var rutas = (typeof rutas_json === 'string') ? JSON.parse(rutas_json) : rutas_json;
+  if (!rutas || rutas.length === 0) return;
+
+  var label       = document.getElementById('anim-label');
+  var legendItems = document.getElementById('legend-items');
+  var legend      = document.getElementById('legend');
+  legend.style.display = 'block';
+
+  var idx = 0;
+  var todasBounds = [];
+
+  function animarSiguiente() {
+    if (idx >= rutas.length) {
+      // Todas terminadas
+      label.style.display = 'none';
+      var ganadora = rutas.find(function(r){ return r.es_ganador; });
+      if (ganadora) {
+        label.innerHTML = '🏆 ' + ganadora.nombre + ' — ' + Math.round(ganadora.costo).toLocaleString() + ' km';
+        label.style.color = '#ffd600';
+        label.style.borderColor = '#ffd600';
+        label.style.display = 'block';
+        _marcarInicioFin(ganadora.ruta_ids, ganadora.provincias_map);
+      }
+      if (todasBounds.length > 0)
+        map.fitBounds(L.latLngBounds(todasBounds), {padding:[40,40]});
+      return;
+    }
+
+    var r     = rutas[idx];
+    var color = COLORES[r.nombre] || '#ffffff';
+    var peso  = r.es_ganador ? 4 : 2;
+    var opa   = r.es_ganador ? 1.0 : 0.65;
+
+    // Label animación
+    label.innerHTML   = '▶ ' + r.nombre + ' &nbsp;|&nbsp; '
+      + r.pasos + ' pasos &nbsp;|&nbsp; '
+      + Math.round(r.costo).toLocaleString() + ' km &nbsp;|&nbsp; ' + r.tiempo + 's';
+    label.style.color       = color;
+    label.style.borderColor = color;
+    label.style.display     = 'block';
+
+    // Entrada en leyenda
+    var medallas = ['🥇','🥈','🥉'];
+    var med = idx < 3 ? medallas[idx] : (idx+1)+'.';
+    var item = document.createElement('div');
+    item.className = 'leg-item';
+    item.innerHTML = '<div class="leg-dot" style="background:'+color+'"></div>'
+      + '<span>'+med+' '+r.nombre+' — '+Math.round(r.costo).toLocaleString()+' km</span>';
+    legendItems.appendChild(item);
+
+    // Coordenadas
+    var pm = r.provincias_map;
+    var coords = r.ruta_ids.map(function(id){ var p=pm[id]; return [p.lat,p.lon]; });
+    coords.forEach(function(c){ todasBounds.push(c); });
+
+    // Animación segmento a segmento
+    var segIdx  = 0;
+    var acum    = [coords[0]];
+    var key     = 'ruta_' + idx;
+    var delay   = coords.length > 80 ? 5 : coords.length > 30 ? 15 : 30;
+
+    function paso() {
+      if (segIdx >= coords.length - 1) {
+        idx++;
+        animTimer = setTimeout(animarSiguiente, 500);
+        return;
+      }
+      segIdx++;
+      acum.push(coords[segIdx]);
+      if (capas_rutas[key]) map.removeLayer(capas_rutas[key]);
+      capas_rutas[key] = L.polyline(acum.slice(), {
+        color:color, weight:peso, opacity:opa
+      }).addTo(map);
+      animTimer = setTimeout(paso, delay);
+    }
+    paso();
+  }
+
+  animarSiguiente();
+}
+</script>
+</body>
+</html>
